@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sashka Messenger P2P</title>
+    <script src="https://unpkg.com/peerjs@1.5.1/dist/peerjs.min.js"></script>
+    <style>
+        :root {
+            --bg: #0a0a0a; --surface: #141414; --surface2: #1e1e1e; --text: #e8e8e8;
+            --accent: #5b9bd5; --border: #2a2a2a; --radius: 12px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui; background: #000; color: var(--text);
+            height: 100vh; display: flex; justify-content: center; align-items: center;
+        }
+        .app { width: 100vw; height: 100vh; max-width: 800px; display: flex; background: var(--surface); }
+        .sidebar { width: 280px; background: var(--bg); border-right: 1px solid var(--border); padding: 12px; }
+        .sidebar h2 { font-size: 1rem; margin-bottom: 12px; }
+        #roomId { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); margin-bottom: 8px; }
+        #connectBtn { width: 100%; padding: 8px; border-radius: 8px; border: none; background: var(--accent); color: #fff; cursor: pointer; margin-bottom: 12px; }
+        .peer-list { font-size: 0.8rem; color: #999; margin-bottom: 12px; }
+        .chat-list { flex: 1; overflow-y: auto; }
+        .chat-item { padding: 8px; cursor: pointer; border-radius: 8px; margin-bottom: 4px; }
+        .chat-item:hover { background: var(--surface2); }
+        .chat-item.active { background: var(--accent); }
+        .main { flex: 1; display: flex; flex-direction: column; }
+        .main-header { padding: 12px; border-bottom: 1px solid var(--border); }
+        .messages { flex: 1; overflow-y: auto; padding: 12px; }
+        .msg { max-width: 70%; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; font-size: 0.9rem; }
+        .msg.mine { background: var(--accent); margin-left: auto; color: #fff; }
+        .msg.other { background: var(--surface2); }
+        .msg .sender { font-size: 0.7rem; font-weight: bold; margin-bottom: 4px; }
+        .input-area { padding: 8px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+        #msgInput { flex: 1; padding: 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); }
+        #sendBtn { padding: 10px 16px; border-radius: 20px; border: none; background: var(--accent); color: #fff; cursor: pointer; }
+        .hidden { display: none !important; }
+        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 16px; border-radius: 20px; z-index: 100; }
+        @media (max-width: 600px) { .sidebar { width: 100%; position: absolute; left: -100%; z-index: 10; } .sidebar.open { left: 0; } }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="sidebar" id="sidebar">
+        <h2>💬 P2P Messenger</h2>
+        <input type="text" id="roomId" placeholder="ID комнаты">
+        <button id="connectBtn">🔗 Подключиться</button>
+        <input type="text" id="nickInput" placeholder="Ваш ник" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);margin-bottom:8px;">
+        <div class="peer-list" id="peerList">Нет участников</div>
+        <button id="backBtn" style="display:none;width:100%;padding:8px;border-radius:8px;border:none;background:var(--surface2);color:var(--text);margin-top:8px;">← Назад</button>
+    </div>
+    <div class="main">
+        <div class="main-header"><strong id="roomTitle">Войдите в комнату</strong></div>
+        <div class="messages" id="messages"></div>
+        <div class="input-area" id="inputArea" style="display:none;">
+            <input type="text" id="msgInput" placeholder="Сообщение..." autocomplete="off">
+            <button id="sendBtn">➤</button>
+        </div>
+    </div>
+</div>
+<div class="toast hidden" id="toast"></div>
+
+<script>
+    const $ = (s) => document.querySelector(s);
+    let peer = null, connections = {};
+    let myNick = localStorage.getItem('p2p_nick') || '';
+    let currentRoom = localStorage.getItem('p2p_room') || '';
+    let messageHistory = {};
+
+    try { messageHistory = JSON.parse(localStorage.getItem('p2p_history') || '{}'); } catch(e) {}
+
+    function saveHistory() { localStorage.setItem('p2p_history', JSON.stringify(messageHistory)); }
+    function showToast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden'); setTimeout(() => t.classList.add('hidden'), 2500); }
+
+    function updatePeerList() {
+        const count = Object.keys(connections).length;
+        $('#peerList').textContent = `👥 Участников: ${count}`;
+    }
+
+    function renderMessages() {
+        const msgs = messageHistory[currentRoom] || [];
+        $('#messages').innerHTML = msgs.map(m => {
+            const cls = m.from === myNick ? 'mine' : 'other';
+            const time = new Date(m.time).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+            return `<div class="msg ${cls}"><div class="sender">${m.from}</div><div>${m.text}</div><div style="font-size:0.6rem;opacity:0.6;">${time}</div></div>`;
+        }).join('');
+        $('#messages').scrollTop = $('#messages').scrollHeight;
+    }
+
+    function sendMessage() {
+        const text = $('#msgInput').value.trim();
+        if (!text || !currentRoom || !myNick) return;
+        
+        const msg = { from: myNick, text, time: Date.now() };
+        if (!messageHistory[currentRoom]) messageHistory[currentRoom] = [];
+        messageHistory[currentRoom].push(msg);
+        saveHistory();
+        renderMessages();
+        
+        // Отправляем всем пирам
+        Object.values(connections).forEach(conn => {
+            if (conn.open) conn.send({ type: 'message', msg });
+        });
+        
+        $('#msgInput').value = '';
+    }
+
+    function connectToRoom() {
+        const roomId = $('#roomId').value.trim();
+        const nick = $('#nickInput').value.trim() || 'Аноним';
+        
+        if (!roomId) return showToast('Введите ID комнаты');
+        
+        myNick = nick;
+        currentRoom = roomId;
+        localStorage.setItem('p2p_nick', myNick);
+        localStorage.setItem('p2p_room', currentRoom);
+        
+        // Закрываем старые соединения
+        if (peer) peer.destroy();
+        Object.values(connections).forEach(c => c.close());
+        connections = {};
+        
+        const peerId = 'p2p_' + roomId + '_' + myNick.replace(/[^a-zA-Z0-9]/g, '_');
+        
+        peer = new Peer(peerId, {
+            host: '0.peerjs.com',
+            port: 443,
+            secure: true
+        });
+        
+        peer.on('open', (id) => {
+            console.log('Peer открыт:', id);
+            $('#roomTitle').textContent = `💬 Комната: ${roomId}`;
+            $('#inputArea').style.display = 'flex';
+            showToast('Подключён к комнате! Ждём других...');
+            updatePeerList();
+            
+            // Пытаемся подключиться к другим
+            setTimeout(() => scanForPeers(roomId), 1000);
+        });
+        
+        peer.on('connection', (conn) => {
+            conn.on('open', () => {
+                connections[conn.peer] = conn;
+                updatePeerList();
+                
+                conn.on('data', (data) => {
+                    if (data.type === 'message') {
+                        if (!messageHistory[currentRoom]) messageHistory[currentRoom] = [];
+                        messageHistory[currentRoom].push(data.msg);
+                        saveHistory();
+                        renderMessages();
+                    }
+                });
+                
+                conn.on('close', () => {
+                    delete connections[conn.peer];
+                    updatePeerList();
+                });
+            });
+        });
+        
+        peer.on('error', (e) => {
+            console.error('Peer error:', e);
+            showToast('Ошибка соединения');
+        });
+    }
+
+    function scanForPeers(roomId) {
+        // Пытаемся подключиться к возможным пирам в комнате
+        for (let i = 0; i < 20; i++) {
+            const tryPeerId = 'p2p_' + roomId + '_user' + i;
+            if (tryPeerId !== peer?.id) {
+                try {
+                    const conn = peer.connect(tryPeerId, { reliable: true });
+                    conn.on('open', () => {
+                        if (!connections[conn.peer]) {
+                            connections[conn.peer] = conn;
+                            updatePeerList();
+                            conn.on('data', (data) => {
+                                if (data.type === 'message') {
+                                    if (!messageHistory[currentRoom]) messageHistory[currentRoom] = [];
+                                    messageHistory[currentRoom].push(data.msg);
+                                    saveHistory();
+                                    renderMessages();
+                                }
+                            });
+                            conn.on('close', () => {
+                                delete connections[conn.peer];
+                                updatePeerList();
+                            });
+                        }
+                    });
+                } catch(e) {}
+            }
+        }
+    }
+
+    // Обработчики
+    $('#connectBtn').addEventListener('click', connectToRoom);
+    $('#sendBtn').addEventListener('click', sendMessage);
+    $('#msgInput').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendMessage();
+    });
+
+    // Восстановление сессии
+    if (currentRoom && myNick) {
+        $('#roomId').value = currentRoom;
+        $('#nickInput').value = myNick;
+        connectToRoom();
+    }
+
+    renderMessages();
+</script>
+</body>
+</html>
